@@ -2,13 +2,9 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 type Station = { url: string; name: string }
-type Playing = {
-  stream: AsyncGenerator<unknown>
-  port: number
-  password: string
-  isLive: boolean
-  startedAt: number
-}
+type Player = { port: number; password: string; isLive: boolean; startedAt: number }
+type Shared = { volume: number; index: number; custom: Station[]; player?: Player }
+type Status = { time: number; length: number }
 
 const BUILTIN: Station[] = [
   { id: '5yx6BWlEVcY', name: 'Chillhop Radio' },
@@ -24,10 +20,10 @@ const BUILTIN: Station[] = [
 
 const PANE = 'music'
 const MARK = 'dev-music-player'
-const INDEX_KEY = 'station'
-const VOLUME_KEY = 'volume'
-const CUSTOM_KEY = 'custom'
 const STEP = 10
+const BEAT_EVERY_MS = 15000
+const STARTUP_GRACE_MS = 15000
+const WATCHDOG_STALE_S = 90
 
 const isPlayingA = atom({ plugin: 'dev-music', key: 'isPlaying' } as const, false)
 const stationA = atom({ plugin: 'dev-music', key: 'station' } as const, '')
@@ -40,79 +36,123 @@ const namesA = atom({ plugin: 'dev-music', key: 'names' } as const, [], {
   shape: 'names-1',
 })
 
-let playing: Playing | undefined
+let lastBeat = 0
 
-const listStations = async ($: EngineInterface): Promise<Station[]> => {
-  const custom = ((await $.store.get(CUSTOM_KEY)) ?? []) as Station[]
+const paths = async ($: EngineInterface) => {
+  const home = (await $.env.get('HOME')) ?? ''
 
-  return [...BUILTIN, ...custom]
+  return {
+    state: `${home}/.claude/dev-music-state.json`,
+    beat: `${home}/.claude/dev-music.heartbeat`,
+    ytdlp: `${home}/.local/bin/yt-dlp`,
+  }
 }
 
-const publish = async ($: EngineInterface) => {
-  const all = await listStations($)
-  const index = Number((await $.store.get(INDEX_KEY)) ?? 0)
-  const volume = Number((await $.store.get(VOLUME_KEY)) ?? 50)
-  await update($, namesA, () => all.map(s => s.name))
-  await update($, indexA, () => index)
-  await update($, volumeA, () => volume)
-  await update($, isPlayingA, () => playing !== undefined)
-  await update($, liveA, () => playing?.isLive ?? false)
-  await update($, stationA, () => all[index]?.name ?? '')
+const readShared = async ($: EngineInterface): Promise<Shared> => {
+  const { state } = await paths($)
+  try {
+    if (await $.fs.exists(state)) {
+      const raw = JSON.parse(await $.fs.read(state))
+
+      return {
+        volume: Number(raw.volume ?? 50),
+        index: Number(raw.index ?? 0),
+        custom: Array.isArray(raw.custom) ? raw.custom : [],
+        player: raw.player ?? undefined,
+      }
+    }
+  } catch {
+    void 0
+  }
+
+  return {
+    volume: Number((await $.store.get('volume')) ?? 50),
+    index: Number((await $.store.get('station')) ?? 0),
+    custom: ((await $.store.get('custom')) ?? []) as Station[],
+  }
 }
 
-const halt = async ($: EngineInterface) => {
-  const was = playing
-  playing = undefined
-  await $.process.run(['pkill', '-f', MARK]).catch(() => undefined)
-  await was?.stream.return(undefined).catch(() => undefined)
-  await update($, timeA, () => 0)
-  await update($, lengthA, () => 0)
-  await publish($)
-}
-
-const volumeUrl = (p: { port: number }, volume: number) =>
-  `http://127.0.0.1:${p.port}/requests/status.json?command=volume&val=${Math.round(volume * 2.56)}`
-
-const pushVolume = ($: EngineInterface, p: Playing, volume: number) =>
-  $.process
-    .run(['curl', '-s', '-m', '3', '-u', `:${p.password}`, volumeUrl(p, volume)], {
+const writeShared = async ($: EngineInterface, shared: Shared) => {
+  const { state } = await paths($)
+  await $.process
+    .run(['sh', '-c', 'umask 077; cat > "$1"', 'sh', state], {
+      stdin: JSON.stringify(shared),
       timeoutMs: 5000,
     })
     .catch(() => undefined)
+}
 
-const pushStatus = ($: EngineInterface, p: Playing) =>
+const beat = async ($: EngineInterface) => {
+  const { beat: file } = await paths($)
+  lastBeat = Date.now()
+  await $.fs.write(file, String(lastBeat)).catch(() => undefined)
+}
+
+const control = ($: EngineInterface, p: Player, query: string) =>
   $.process
     .run(
-      ['curl', '-s', '-m', '2', '-u', `:${p.password}`, `http://127.0.0.1:${p.port}/requests/status.json`],
+      [
+        'curl', '-s', '-m', '2', '-u', `:${p.password}`,
+        `http://127.0.0.1:${p.port}/requests/status.json${query}`,
+      ],
       { timeoutMs: 4000 },
     )
     .catch(() => undefined)
 
-let isTicking = false
+const probe = async ($: EngineInterface, p: Player): Promise<Status | undefined> => {
+  const r = await control($, p, '')
+  if (r?.exitCode !== 0 || !r.stdout.includes('"state"')) {
+    return undefined
+  }
+
+  return {
+    time: Number(/"time"\s*:\s*(\d+)/.exec(r.stdout)?.[1] ?? 0),
+    length: Number(/"length"\s*:\s*(\d+)/.exec(r.stdout)?.[1] ?? 0),
+  }
+}
+
+const current = async ($: EngineInterface) => {
+  const shared = await readShared($)
+  const p = shared.player
+  if (!p) {
+    return { shared, status: undefined as Status | undefined }
+  }
+  const status = await probe($, p)
+  if (status) {
+    return { shared, status }
+  }
+  if (Date.now() - p.startedAt < STARTUP_GRACE_MS) {
+    return { shared, status: { time: 0, length: 0 } }
+  }
+  shared.player = undefined
+  await writeShared($, shared)
+
+  return { shared, status: undefined as Status | undefined }
+}
+
+const publish = async ($: EngineInterface) => {
+  const { shared, status } = await current($)
+  const all = [...BUILTIN, ...shared.custom]
+  const p = shared.player
+  const isLive = p?.isLive ?? false
+  const time = p && isLive ? Math.floor((Date.now() - p.startedAt) / 1000) : (status?.time ?? 0)
+  await update($, namesA, () => all.map(s => s.name))
+  await update($, indexA, () => shared.index)
+  await update($, volumeA, () => shared.volume)
+  await update($, isPlayingA, () => p !== undefined)
+  await update($, liveA, () => isLive)
+  await update($, stationA, () => all[shared.index]?.name ?? '')
+  await update($, timeA, () => time)
+  await update($, lengthA, () => (isLive ? 0 : (status?.length ?? 0)))
+}
 
 const tick = async ($: EngineInterface) => {
-  const now = playing
-  if (!now || isTicking) {
-    return
+  if (Date.now() - lastBeat > BEAT_EVERY_MS) {
+    await beat($)
   }
   const open = await $.ui.panes()
-  if (!open.some(p => p.id === PANE)) {
-    return
-  }
-  isTicking = true
-  try {
-    let time = Math.floor((Date.now() - now.startedAt) / 1000)
-    let length = 0
-    if (!now.isLive) {
-      const r = await pushStatus($, now)
-      const body = r?.exitCode === 0 ? r.stdout : ''
-      time = Number(/"time"\s*:\s*(\d+)/.exec(body)?.[1] ?? 0)
-      length = Number(/"length"\s*:\s*(\d+)/.exec(body)?.[1] ?? 0)
-    }
-    await update($, timeA, () => time)
-    await update($, lengthA, () => length)
-  } finally {
-    isTicking = false
+  if (open.some(p => p.id === PANE)) {
+    await publish($)
   }
 }
 
@@ -125,19 +165,36 @@ const clock = (seconds: number) => {
   return h > 0 ? `${h}:${m}:${sec}` : `${m}:${sec}`
 }
 
-const start = async ($: EngineInterface, index: number): Promise<string> => {
-  const all = await listStations($)
-  const station = all[index] ?? all[0]
+const halt = async ($: EngineInterface) => {
+  const shared = await readShared($)
+  await $.process.run(['pkill', '-f', MARK]).catch(() => undefined)
+  shared.player = undefined
+  await writeShared($, shared)
+  await publish($)
+}
+
+const LAUNCH = [
+  'hb="$1"; shift',
+  '( "$@" >/dev/null 2>&1 </dev/null &',
+  '  pid=$!',
+  '  while kill -0 "$pid" 2>/dev/null; do',
+  '    sleep 15',
+  '    t=$(stat -f %m "$hb" 2>/dev/null || echo 0)',
+  `    [ $(( $(date +%s) - t )) -gt ${WATCHDOG_STALE_S} ] && kill "$pid"`,
+  '  done',
+  ') >/dev/null 2>&1 </dev/null &',
+].join('\n')
+
+const start = async ($: EngineInterface, wanted: number): Promise<string> => {
+  const shared = await readShared($)
+  const all = [...BUILTIN, ...shared.custom]
+  const index = all[wanted] ? wanted : 0
+  const station = all[index]
   if (!station) {
     return 'No station.'
   }
-  const volume = Number((await $.store.get(VOLUME_KEY)) ?? 50)
-  await $.store.set(INDEX_KEY, all[index] ? index : 0)
-  await halt($)
-
-  const home = await $.env.get('HOME')
-  const local = home ? `${home}/.local/bin/yt-dlp` : ''
-  const bin = local && (await $.fs.exists(local)) ? local : 'yt-dlp'
+  const where = await paths($)
+  const bin = (await $.fs.exists(where.ytdlp)) ? where.ytdlp : 'yt-dlp'
   const resolve = () =>
     $.process.run([bin, '-g', '-f', 'bestaudio/best', '--no-playlist', '--', station.url], {
       timeoutMs: 45000,
@@ -157,49 +214,48 @@ const start = async ($: EngineInterface, index: number): Promise<string> => {
     return `${station.name}: ${reason}. Try another station, or update yt-dlp.`
   }
 
+  await $.process.run(['pkill', '-f', MARK]).catch(() => undefined)
+  await beat($)
   const port = 20000 + Math.floor(Math.random() * 40000)
   const password = Math.random().toString(36).slice(2)
-  const stream = $.process.spawn({
-    argv: [
-      'vlc', '-I', 'dummy', '--no-video', `--volume=${Math.round(volume * 2.56)}`,
-      '--extraintf', 'http', '--http-host', '127.0.0.1',
-      '--http-port', String(port), '--http-password', password,
-      `--input-title-format=${MARK}`, url,
-    ],
-  })
-  const own: Playing = {
-    stream,
+  const launched = await $.process
+    .run(
+      [
+        'sh', '-c', LAUNCH, 'sh', where.beat,
+        'vlc', '-I', 'dummy', '--no-video', `--volume=${Math.round(shared.volume * 2.56)}`,
+        '--extraintf', 'http', '--http-host', '127.0.0.1',
+        '--http-port', String(port), '--http-password', password,
+        `--input-title-format=${MARK}`, url,
+      ],
+      { timeoutMs: 10000 },
+    )
+    .catch(() => undefined)
+  if (launched?.exitCode !== 0) {
+    return 'Could not start VLC.'
+  }
+  const player: Player = {
     port,
     password,
     isLive: url.includes('yt_live_broadcast'),
     startedAt: Date.now(),
   }
-  playing = own
+  shared.player = player
+  shared.index = index
+  await writeShared($, shared)
   await publish($)
 
   void (async () => {
+    const level = Math.round(shared.volume * 2.56)
     for (let i = 0; i < 10; i++) {
       await $.clock.sleep(1000)
-      if (playing !== own) {
+      const now = await readShared($)
+      if (now.player?.startedAt !== player.startedAt) {
         return
       }
-      const r = await pushVolume($, own, volume)
+      const r = await control($, player, `?command=volume&val=${level}`)
       if (r?.exitCode === 0) {
         return
       }
-    }
-  })()
-  void (async () => {
-    try {
-      for await (const _ of stream) {
-        void _
-      }
-    } catch {
-      void 0
-    }
-    if (playing === own) {
-      playing = undefined
-      await publish($)
     }
   })()
 
@@ -223,41 +279,41 @@ const seekValue = (spec: string): string | undefined => {
 }
 
 const seek = async ($: EngineInterface, spec: string): Promise<string> => {
-  const now = playing
-  if (!now) {
+  const { shared } = await current($)
+  const p = shared.player
+  if (!p) {
     return 'Nothing is playing.'
   }
-  if (now.isLive) {
+  if (p.isLive) {
     return 'Cannot seek a live stream.'
   }
   const value = seekValue(spec)
   if (!value) {
     return 'Use /music seek <mm:ss | h:mm:ss | seconds | +30 | -30 | 50%>.'
   }
-  const url = `http://127.0.0.1:${now.port}/requests/status.json?command=seek&val=${encodeURIComponent(value)}`
-  const r = await $.process
-    .run(['curl', '-s', '-m', '3', '-u', `:${now.password}`, url], { timeoutMs: 5000 })
-    .catch(() => undefined)
+  const r = await control($, p, `?command=seek&val=${encodeURIComponent(value)}`)
   if (r?.exitCode !== 0) {
     return 'Seek failed.'
   }
-  await tick($)
+  await publish($)
 
   return 'Seeked.'
 }
 
 const setVolume = async ($: EngineInterface, wanted: number): Promise<string> => {
   const volume = Math.min(100, Math.max(0, wanted))
-  await $.store.set(VOLUME_KEY, volume)
-  const now = playing
-  if (!now) {
+  const { shared } = await current($)
+  shared.volume = volume
+  await writeShared($, shared)
+  const p = shared.player
+  if (!p) {
     await publish($)
 
     return `Volume set to ${volume}%. /music to play.`
   }
-  const r = await pushVolume($, now, volume)
+  const r = await control($, p, `?command=volume&val=${Math.round(volume * 2.56)}`)
   if (r?.exitCode !== 0) {
-    return start($, Number((await $.store.get(INDEX_KEY)) ?? 0))
+    return start($, shared.index)
   }
   await publish($)
 
@@ -265,13 +321,14 @@ const setVolume = async ($: EngineInterface, wanted: number): Promise<string> =>
 }
 
 const toggle = async ($: EngineInterface): Promise<string> => {
-  if (playing) {
+  const { shared } = await current($)
+  if (shared.player) {
     await halt($)
 
     return 'Music stopped.'
   }
 
-  return start($, Number((await $.store.get(INDEX_KEY)) ?? 0))
+  return start($, shared.index)
 }
 
 export const register: Register = on => {
@@ -279,8 +336,9 @@ export const register: Register = on => {
     await $.command.register({
       name: 'music',
       description:
-        'Toggle lofi radio. /music <n>, list, add <url> [name], rm <n>, + / - / vol <0-100>, seek <mm:ss>, panel.',
+        'Toggle lofi radio (shared by all sessions). /music <n>, list, add <url> [name], rm <n>, + / - / vol <0-100>, seek <mm:ss>, panel.',
     })
+    await beat($)
     await publish($)
     $.clock.every(1000, () => void tick($))
 
@@ -289,7 +347,8 @@ export const register: Register = on => {
 
   on('command.run', { command: 'music' }, async ($, e) => {
     const arg = e.args.trim()
-    const all = await listStations($)
+    const { shared } = await current($)
+    const all = [...BUILTIN, ...shared.custom]
 
     if (arg === '') {
       return { text: await toggle($) }
@@ -335,9 +394,8 @@ export const register: Register = on => {
       }
       let name = added[2]?.trim()
       if (!name) {
-        const home = await $.env.get('HOME')
-        const local = home ? `${home}/.local/bin/yt-dlp` : ''
-        const bin = local && (await $.fs.exists(local)) ? local : 'yt-dlp'
+        const where = await paths($)
+        const bin = (await $.fs.exists(where.ytdlp)) ? where.ytdlp : 'yt-dlp'
         const t = await $.process
           .run([bin, '--no-playlist', '--print', 'title', '--', link], { timeoutMs: 45000 })
           .catch(() => undefined)
@@ -346,8 +404,8 @@ export const register: Register = on => {
         }
         name = t.stdout.split('\n')[0]?.trim() || link
       }
-      const custom = all.slice(BUILTIN.length)
-      await $.store.set(CUSTOM_KEY, [...custom, { url: link, name }])
+      shared.custom = [...shared.custom, { url: link, name }]
+      await writeShared($, shared)
       await publish($)
 
       return { text: `Added #${all.length + 1}: ${name}. /music ${all.length + 1} to play.` }
@@ -359,21 +417,21 @@ export const register: Register = on => {
       if (n <= BUILTIN.length || n > all.length) {
         return { text: `Only custom stations (#${BUILTIN.length + 1}+) can be removed.` }
       }
-      const custom = all.slice(BUILTIN.length)
-      await $.store.set(
-        CUSTOM_KEY,
-        custom.filter((_, i) => i !== n - BUILTIN.length - 1),
-      )
-      await $.store.set(INDEX_KEY, 0)
+      shared.custom = shared.custom.filter((_, i) => i !== n - BUILTIN.length - 1)
+      shared.index = 0
+      await writeShared($, shared)
       await publish($)
 
       return { text: `Removed #${n}.` }
     }
 
     if (arg === '+' || arg === '-' || /^vol(ume)?\s+\d+$/.test(arg)) {
-      const now = Number((await $.store.get(VOLUME_KEY)) ?? 50)
       const wanted =
-        arg === '+' ? now + STEP : arg === '-' ? now - STEP : Number(arg.split(/\s+/)[1])
+        arg === '+'
+          ? shared.volume + STEP
+          : arg === '-'
+            ? shared.volume - STEP
+            : Number(arg.split(/\s+/)[1])
 
       return { text: await setVolume($, wanted) }
     }
@@ -384,7 +442,7 @@ export const register: Register = on => {
     }
 
     return {
-      text: `Use /music, /music <1-${all.length}>, list, add <url> [name], rm <n>, +, -, vol <0-100>, panel.`,
+      text: `Use /music, /music <1-${all.length}>, list, add <url> [name], rm <n>, +, -, vol <0-100>, seek <mm:ss>, panel.`,
     }
   })
 
