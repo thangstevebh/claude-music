@@ -55,13 +55,11 @@ export const register: Register = on => {
       await $.store.set(INDEX_KEY, index)
     }
 
-    if (was) {
-      playing = undefined
-      await $.process.run(['pkill', '-f', MARK]).catch(() => undefined)
-      await was.stream.return(undefined).catch(() => undefined)
-      if (!arg) {
-        return { text: 'Music stopped.' }
-      }
+    playing = undefined
+    await $.process.run(['pkill', '-f', MARK]).catch(() => undefined)
+    await was?.stream.return(undefined).catch(() => undefined)
+    if (was && !arg) {
+      return { text: 'Music stopped.' }
     }
 
     const station = STATIONS[index] ?? STATIONS[0]
