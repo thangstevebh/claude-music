@@ -73,13 +73,23 @@ export const register: Register = on => {
     }
 
     const station = STATIONS[index] ?? STATIONS[0]
-    const found = await $.process.run(
-      ['yt-dlp', '-g', '-f', 'bestaudio/best', `https://www.youtube.com/watch?v=${station.id}`],
-      { timeoutMs: 45000 },
-    )
-    const url = found.stdout.split('\n')[0]?.trim()
-    if (found.exitCode !== 0 || !url) {
-      return { text: 'yt-dlp could not resolve the stream. Try `pip install -U yt-dlp`.' }
+    const resolve = () =>
+      $.process.run(
+        ['yt-dlp', '-g', '-f', 'bestaudio/best', `https://www.youtube.com/watch?v=${station.id}`],
+        { timeoutMs: 45000 },
+      )
+    let found = await resolve().catch(() => undefined)
+    if (found?.exitCode !== 0 || !found.stdout.trim()) {
+      found = await resolve().catch(() => undefined)
+    }
+    const url = found?.stdout.split('\n')[0]?.trim()
+    if (!found || found.exitCode !== 0 || !url) {
+      const reason =
+        found?.stderr
+          .split('\n')
+          .filter(l => l.startsWith('ERROR'))
+          .pop() ?? 'yt-dlp did not run or timed out'
+      return { text: `${station.name}: ${reason}. Try another station, or pip install -U yt-dlp.` }
     }
 
     const port = 20000 + Math.floor(Math.random() * 40000)
