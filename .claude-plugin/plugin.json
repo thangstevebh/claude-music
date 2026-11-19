@@ -1,1 +1,6 @@
-{ "name": "dev-music", "version": "0.1.0", "description": "Loop background music for developers with /music." }
+{
+  "name": "dev-music",
+  "version": "0.2.0",
+  "description": "Loop background lofi music for developers with /music, plus a compact control pane.",
+  "types": "./types/index.d.ts"
+}
