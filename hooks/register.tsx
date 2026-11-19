@@ -40,29 +40,34 @@ let lastBeat = 0
 
 const paths = async ($: EngineInterface) => {
   const home = (await $.env.get('HOME')) ?? ''
+  const env = await $.process.hookEnv().catch(() => ({}) as Record<string, string>)
+  const dir = env.CLAUDE_PLUGIN_DATA ?? `${home}/.claude/plugins/data/dev-music`
 
   return {
-    state: `${home}/.claude/dev-music-state.json`,
-    beat: `${home}/.claude/dev-music.heartbeat`,
+    state: `${dir}/state.json`,
+    beat: `${dir}/heartbeat`,
+    legacy: `${home}/.claude/dev-music-state.json`,
     ytdlp: `${home}/.local/bin/yt-dlp`,
   }
 }
 
 const readShared = async ($: EngineInterface): Promise<Shared> => {
-  const { state } = await paths($)
-  try {
-    if (await $.fs.exists(state)) {
-      const raw = JSON.parse(await $.fs.read(state))
+  const { state, legacy } = await paths($)
+  for (const file of [state, legacy]) {
+    try {
+      if (await $.fs.exists(file)) {
+        const raw = JSON.parse(await $.fs.read(file))
 
-      return {
-        volume: Number(raw.volume ?? 50),
-        index: Number(raw.index ?? 0),
-        custom: Array.isArray(raw.custom) ? raw.custom : [],
-        player: raw.player ?? undefined,
+        return {
+          volume: Number(raw.volume ?? 50),
+          index: Number(raw.index ?? 0),
+          custom: Array.isArray(raw.custom) ? raw.custom : [],
+          player: raw.player ?? undefined,
+        }
       }
+    } catch {
+      void 0
     }
-  } catch {
-    void 0
   }
 
   return {
@@ -75,7 +80,7 @@ const readShared = async ($: EngineInterface): Promise<Shared> => {
 const writeShared = async ($: EngineInterface, shared: Shared) => {
   const { state } = await paths($)
   await $.process
-    .run(['sh', '-c', 'umask 077; cat > "$1"', 'sh', state], {
+    .run(['sh', '-c', 'umask 077; mkdir -p "$(dirname "$1")"; cat > "$1"', 'sh', state], {
       stdin: JSON.stringify(shared),
       timeoutMs: 5000,
     })

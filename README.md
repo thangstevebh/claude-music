@@ -33,6 +33,6 @@ claude plugin install dev-music --marketplace thangstevebh/claude-music
 - `/music seek <mm:ss | seconds | +30 | -30 | 50%>` jumps within a regular video (not live streams). In the panel, `h` and `l` jump 30 s back and forward, and each block of the progress bar is clickable.
 - `/music vol <0-100>` sets the volume.
 
-One player is shared by every Claude Code session on the machine. Station, volume, progress and the panel show the same state everywhere, and any session can start, stop, seek or change the volume. The state lives in `~/.claude/dev-music-state.json` (readable only by you, it holds the local control password of the player). VLC runs detached from any one session, and a watchdog stops it about 90 seconds after the last session using the mod has closed.
+One player is shared by every Claude Code session on the machine. Station, volume, progress and the panel show the same state everywhere, and any session can start, stop, seek or change the volume. The state lives in the plugin's own data folder (`CLAUDE_PLUGIN_DATA`, kept across updates, outside the plugin's code), in `state.json` readable only by you, since it holds the local control password of the player. VLC runs detached from any one session, and a watchdog stops it about 90 seconds after the last session using the mod has closed.
 
 Volume changes apply live through VLC's local HTTP interface (127.0.0.1, random port and password per session), so the music does not cut out. `curl` is required.
