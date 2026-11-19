@@ -6,6 +6,9 @@ declare module 'claude-code' {
       isPlaying: boolean
       station: string
       volume: number
+      time: number
+      length: number
+      isLive: boolean
       index: number
       names: Shaped<string[]>
     }

@@ -30,7 +30,7 @@ claude plugin install dev-music --marketplace thangstevebh/claude-music
 - `/music add <https-url> [name]` adds your own station: any link `yt-dlp` can stream, such as a YouTube live stream or video. Without a name, the title is read from the link. Custom stations are numbered after the built-in ones.
 - `/music rm <n>` removes a custom station.
 - `/music panel` shows or hides a compact control pane: now playing, play/stop, volume buttons and a clickable station list. In the pane, `p` plays or stops, `d` and `u` turn the volume down and up, `1`-`9` pick a station.
-- `/music +` and `/music -` change volume by 10%.
+- `/music seek <mm:ss | seconds | +30 | -30 | 50%>` jumps within a regular video (not live streams). In the panel, `h` and `l` jump 30 s back and forward, and each block of the progress bar is clickable.
 - `/music vol <0-100>` sets the volume.
 
 Volume changes apply live through VLC's local HTTP interface (127.0.0.1, random port and password per session), so the music does not cut out. `curl` is required.

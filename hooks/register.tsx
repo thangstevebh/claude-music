@@ -2,7 +2,13 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 type Station = { url: string; name: string }
-type Playing = { stream: AsyncGenerator<unknown>; port: number; password: string }
+type Playing = {
+  stream: AsyncGenerator<unknown>
+  port: number
+  password: string
+  isLive: boolean
+  startedAt: number
+}
 
 const BUILTIN: Station[] = [
   { id: '5yx6BWlEVcY', name: 'Chillhop Radio' },
@@ -26,6 +32,9 @@ const STEP = 10
 const isPlayingA = atom({ plugin: 'dev-music', key: 'isPlaying' } as const, false)
 const stationA = atom({ plugin: 'dev-music', key: 'station' } as const, '')
 const volumeA = atom({ plugin: 'dev-music', key: 'volume' } as const, 50)
+const timeA = atom({ plugin: 'dev-music', key: 'time' } as const, 0)
+const lengthA = atom({ plugin: 'dev-music', key: 'length' } as const, 0)
+const liveA = atom({ plugin: 'dev-music', key: 'isLive' } as const, false)
 const indexA = atom({ plugin: 'dev-music', key: 'index' } as const, 0)
 const namesA = atom({ plugin: 'dev-music', key: 'names' } as const, [], {
   shape: 'names-1',
@@ -47,6 +56,7 @@ const publish = async ($: EngineInterface) => {
   await update($, indexA, () => index)
   await update($, volumeA, () => volume)
   await update($, isPlayingA, () => playing !== undefined)
+  await update($, liveA, () => playing?.isLive ?? false)
   await update($, stationA, () => all[index]?.name ?? '')
 }
 
@@ -55,6 +65,8 @@ const halt = async ($: EngineInterface) => {
   playing = undefined
   await $.process.run(['pkill', '-f', MARK]).catch(() => undefined)
   await was?.stream.return(undefined).catch(() => undefined)
+  await update($, timeA, () => 0)
+  await update($, lengthA, () => 0)
   await publish($)
 }
 
@@ -67,6 +79,51 @@ const pushVolume = ($: EngineInterface, p: Playing, volume: number) =>
       timeoutMs: 5000,
     })
     .catch(() => undefined)
+
+const pushStatus = ($: EngineInterface, p: Playing) =>
+  $.process
+    .run(
+      ['curl', '-s', '-m', '2', '-u', `:${p.password}`, `http://127.0.0.1:${p.port}/requests/status.json`],
+      { timeoutMs: 4000 },
+    )
+    .catch(() => undefined)
+
+let isTicking = false
+
+const tick = async ($: EngineInterface) => {
+  const now = playing
+  if (!now || isTicking) {
+    return
+  }
+  const open = await $.ui.panes()
+  if (!open.some(p => p.id === PANE)) {
+    return
+  }
+  isTicking = true
+  try {
+    let time = Math.floor((Date.now() - now.startedAt) / 1000)
+    let length = 0
+    if (!now.isLive) {
+      const r = await pushStatus($, now)
+      const body = r?.exitCode === 0 ? r.stdout : ''
+      time = Number(/"time"\s*:\s*(\d+)/.exec(body)?.[1] ?? 0)
+      length = Number(/"length"\s*:\s*(\d+)/.exec(body)?.[1] ?? 0)
+    }
+    await update($, timeA, () => time)
+    await update($, lengthA, () => length)
+  } finally {
+    isTicking = false
+  }
+}
+
+const clock = (seconds: number) => {
+  const s = Math.max(0, Math.floor(seconds))
+  const h = Math.floor(s / 3600)
+  const m = String(Math.floor((s % 3600) / 60)).padStart(2, '0')
+  const sec = String(s % 60).padStart(2, '0')
+
+  return h > 0 ? `${h}:${m}:${sec}` : `${m}:${sec}`
+}
 
 const start = async ($: EngineInterface, index: number): Promise<string> => {
   const all = await listStations($)
@@ -110,7 +167,13 @@ const start = async ($: EngineInterface, index: number): Promise<string> => {
       `--input-title-format=${MARK}`, url,
     ],
   })
-  const own: Playing = { stream, port, password }
+  const own: Playing = {
+    stream,
+    port,
+    password,
+    isLive: url.includes('yt_live_broadcast'),
+    startedAt: Date.now(),
+  }
   playing = own
   await publish($)
 
@@ -141,6 +204,46 @@ const start = async ($: EngineInterface, index: number): Promise<string> => {
   })()
 
   return `Playing: ${station.name}.`
+}
+
+const seekValue = (spec: string): string | undefined => {
+  const text = spec.trim()
+  if (/^[+-]\d+$/.test(text)) {
+    return `${text}S`
+  }
+  if (/^\d+%$/.test(text) || /^\d+$/.test(text)) {
+    return text
+  }
+  const parts = /^(?:(\d+):)?(\d+):(\d+)$/.exec(text)
+  if (parts) {
+    return String(Number(parts[1] ?? 0) * 3600 + Number(parts[2]) * 60 + Number(parts[3]))
+  }
+
+  return undefined
+}
+
+const seek = async ($: EngineInterface, spec: string): Promise<string> => {
+  const now = playing
+  if (!now) {
+    return 'Nothing is playing.'
+  }
+  if (now.isLive) {
+    return 'Cannot seek a live stream.'
+  }
+  const value = seekValue(spec)
+  if (!value) {
+    return 'Use /music seek <mm:ss | h:mm:ss | seconds | +30 | -30 | 50%>.'
+  }
+  const url = `http://127.0.0.1:${now.port}/requests/status.json?command=seek&val=${encodeURIComponent(value)}`
+  const r = await $.process
+    .run(['curl', '-s', '-m', '3', '-u', `:${now.password}`, url], { timeoutMs: 5000 })
+    .catch(() => undefined)
+  if (r?.exitCode !== 0) {
+    return 'Seek failed.'
+  }
+  await tick($)
+
+  return 'Seeked.'
 }
 
 const setVolume = async ($: EngineInterface, wanted: number): Promise<string> => {
@@ -176,9 +279,10 @@ export const register: Register = on => {
     await $.command.register({
       name: 'music',
       description:
-        'Toggle lofi radio. /music <n>, list, add <url> [name], rm <n>, + / - / vol <0-100>, panel.',
+        'Toggle lofi radio. /music <n>, list, add <url> [name], rm <n>, + / - / vol <0-100>, seek <mm:ss>, panel.',
     })
     await publish($)
+    $.clock.every(1000, () => void tick($))
 
     return next(e)
   })
@@ -208,6 +312,11 @@ export const register: Register = on => {
       })
 
       return { text: 'Music panel shown.' }
+    }
+
+    const sought = /^seek\s+(.+)$/.exec(arg)
+    if (sought) {
+      return { text: await seek($, sought[1] ?? '') }
     }
 
     if (arg === 'list') {
@@ -286,6 +395,11 @@ export const register: Register = on => {
     const volume = await read($, volumeA)
     const index = await read($, indexA)
     const names = await read($, namesA)
+    const time = await read($, timeA)
+    const length = await read($, lengthA)
+    const isLive = await read($, liveA)
+    const done = length > 0 ? Math.min(16, Math.round((time / length) * 16)) : 0
+    const track = isLive ? `${clock(time)} · LIVE` : `${clock(time)} · loading`
     const filled = Math.round(volume / 10)
     const bar = `${'█'.repeat(filled)}${'░'.repeat(10 - filled)}`
 
@@ -294,6 +408,28 @@ export const register: Register = on => {
         <Text wrap="truncate-end" color={isPlaying ? 'success' : undefined}>
           {isPlaying ? '▶' : '■'} {station || 'Stopped'}
         </Text>
+        {isPlaying && length === 0 && <Text dimColor>{track}</Text>}
+        {isPlaying && length > 0 && (
+          <Box>
+            <Button key="seek-back" label="<<" hotkey="h" onPress={() => void seek($, '-30')} />
+            <Text> </Text>
+            {Array.from({ length: 16 }, (_, i) => (
+              <Button
+                key={`seek:${i}`}
+                plain
+                label={i < done ? '▰' : '▱'}
+                onPress={() => void seek($, String(Math.floor((length * (i + 0.5)) / 16)))}
+              />
+            ))}
+            <Text> </Text>
+            <Button key="seek-fwd" label=">>" hotkey="l" onPress={() => void seek($, '+30')} />
+          </Box>
+        )}
+        {isPlaying && length > 0 && (
+          <Text dimColor>
+            {clock(time)} / {clock(length)}
+          </Text>
+        )}
         <Box>
           <Button
             key="toggle"
