@@ -25,7 +25,10 @@ claude plugin install dev-music --marketplace thangstevebh/claude-music
 ## Usage
 
 - `/music` toggles the last chosen station (default: Chillhop Radio).
-- `/music <1-10>` switches station.
+- `/music list` shows all stations.
+- `/music <n>` switches station (1-9 are the built-in lofi.cafe channels).
+- `/music add <https-url> [name]` adds your own station: any link `yt-dlp` can stream, such as a YouTube live stream or video. Without a name, the title is read from the link. Custom stations are numbered after the built-in ones.
+- `/music rm <n>` removes a custom station.
 - `/music +` and `/music -` change volume by 10%.
 - `/music vol <0-100>` sets the volume.
 

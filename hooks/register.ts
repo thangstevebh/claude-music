@@ -5,7 +5,6 @@ const STATIONS = [
   { id: '7NOSDKb0HlU', name: 'lofi hip hop radio' },
   { id: 'blAFxjhg62k', name: 'Coffee Shop Radio' },
   { id: 'TfmECBzmOn4', name: 'Lofi Hip Hop Radio (relax)' },
-  { id: 'lkcjlTqmoDY', name: 'videogame lofi' },
   { id: 'i6WzngxTnBA', name: 'late night vibes' },
   { id: 'UedTcufyrHc', name: 'ChillSynth FM' },
   { id: 'FWjZ0x2M8og', name: 'sad & sleepy beats' },
@@ -13,6 +12,14 @@ const STATIONS = [
   { id: 'BLIKwfIJIyo', name: 'Space Ambient' },
 ] as const
 
+type Station = { url: string; name: string }
+
+const BUILTIN: Station[] = STATIONS.map(s => ({
+  url: `https://www.youtube.com/watch?v=${s.id}`,
+  name: s.name,
+}))
+
+const CUSTOM_KEY = 'custom'
 const MARK = 'dev-music-player'
 const INDEX_KEY = 'station'
 const VOLUME_KEY = 'volume'
@@ -22,10 +29,10 @@ export const register: Register = on => {
   let playing: { stream: AsyncGenerator<unknown>; port: number; password: string } | undefined
 
   on('session.start', async ($, e, next) => {
-    const list = STATIONS.map((s, i) => `${i + 1}=${s.name}`).join(', ')
     await $.command.register({
       name: 'music',
-      description: `Toggle lofi radio. /music <n> picks a station (${list}); /music + or - or vol <0-100> sets volume.`,
+      description:
+        'Toggle lofi radio. /music <n> picks a station, list, add <url> [name], rm <n>, + / - / vol <0-100> for volume.',
     })
     return next(e)
   })
@@ -33,6 +40,45 @@ export const register: Register = on => {
   on('command.run', { command: 'music' }, async ($, e) => {
     const arg = e.args.trim()
     const was = playing
+
+    const custom = ((await $.store.get(CUSTOM_KEY)) ?? []) as Station[]
+    const all = [...BUILTIN, ...custom]
+
+    if (arg === 'list') {
+      const lines = all.map((st, i) => `${i + 1}. ${st.name}${i >= BUILTIN.length ? ' (custom)' : ''}`)
+      return { text: lines.join('\n') }
+    }
+
+    const added = /^add\s+(\S+)(?:\s+(.+))?$/.exec(arg)
+    if (added) {
+      const link = added[1] ?? ''
+      if (!/^https:\/\//.test(link)) {
+        return { text: 'Use /music add <https-url> [name]. YouTube links (live or video) work.' }
+      }
+      let name = added[2]?.trim()
+      if (!name) {
+        const t = await $.process
+          .run(['yt-dlp', '--no-playlist', '--print', 'title', '--', link], { timeoutMs: 45000 })
+          .catch(() => undefined)
+        if (t?.exitCode !== 0) {
+          return { text: 'yt-dlp could not read that link.' }
+        }
+        name = t.stdout.split('\n')[0]?.trim() || link
+      }
+      await $.store.set(CUSTOM_KEY, [...custom, { url: link, name }])
+      return { text: `Added #${all.length + 1}: ${name}. /music ${all.length + 1} to play.` }
+    }
+
+    const removed = /^rm\s+(\d+)$/.exec(arg)
+    if (removed) {
+      const n = Number(removed[1])
+      if (n <= BUILTIN.length || n > all.length) {
+        return { text: `Only custom stations (#${BUILTIN.length + 1}+) can be removed.` }
+      }
+      await $.store.set(CUSTOM_KEY, custom.filter((_, i) => i !== n - BUILTIN.length - 1))
+      await $.store.set(INDEX_KEY, 0)
+      return { text: `Removed #${n}.` }
+    }
 
     let volume = Number((await $.store.get(VOLUME_KEY)) ?? 50)
     let index = Number((await $.store.get(INDEX_KEY)) ?? 0)
@@ -58,8 +104,8 @@ export const register: Register = on => {
       }
     } else if (arg) {
       const n = Number(arg)
-      if (!Number.isInteger(n) || n < 1 || n > STATIONS.length) {
-        return { text: `Use /music, /music <1-${STATIONS.length}>, /music +, /music -, /music vol <0-100>.` }
+      if (!Number.isInteger(n) || n < 1 || n > all.length) {
+        return { text: `Use /music, /music <1-${all.length}>, list, add <url> [name], rm <n>, +, -, vol <0-100>.` }
       }
       index = n - 1
       await $.store.set(INDEX_KEY, index)
@@ -72,10 +118,10 @@ export const register: Register = on => {
       return { text: 'Music stopped.' }
     }
 
-    const station = STATIONS[index] ?? STATIONS[0]
+    const station = all[index] ?? all[0] ?? BUILTIN[0]
     const resolve = () =>
       $.process.run(
-        ['yt-dlp', '-g', '-f', 'bestaudio/best', `https://www.youtube.com/watch?v=${station.id}`],
+        ['yt-dlp', '-g', '-f', 'bestaudio/best', '--no-playlist', '--', station?.url ?? ''],
         { timeoutMs: 45000 },
       )
     let found = await resolve().catch(() => undefined)
@@ -89,7 +135,7 @@ export const register: Register = on => {
           .split('\n')
           .filter(l => l.startsWith('ERROR'))
           .pop() ?? 'yt-dlp did not run or timed out'
-      return { text: `${station.name}: ${reason}. Try another station, or pip install -U yt-dlp.` }
+      return { text: `${station?.name}: ${reason}. Try another station, or pip install -U yt-dlp.` }
     }
 
     const port = 20000 + Math.floor(Math.random() * 40000)
@@ -138,6 +184,6 @@ export const register: Register = on => {
       }
     })()
 
-    return { text: `${isChange ? `Volume ${volume}%` : 'Playing'}: ${station.name}. /music again to stop.` }
+    return { text: `${isChange ? `Volume ${volume}%` : 'Playing'}: ${station?.name}. /music again to stop.` }
   })
 }
