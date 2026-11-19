@@ -29,4 +29,4 @@ claude plugin install dev-music --marketplace thangstevebh/claude-music
 - `/music +` and `/music -` change volume by 10%.
 - `/music vol <0-100>` sets the volume.
 
-Changing volume while playing restarts the stream, so the music cuts out for a few seconds.
+Volume changes apply live through VLC's local HTTP interface (127.0.0.1, random port and password per session), so the music does not cut out. `curl` is required.

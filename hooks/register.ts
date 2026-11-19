@@ -19,7 +19,7 @@ const VOLUME_KEY = 'volume'
 const STEP = 10
 
 export const register: Register = on => {
-  let playing: { stream: AsyncGenerator<unknown> } | undefined
+  let playing: { stream: AsyncGenerator<unknown>; port: number; password: string } | undefined
 
   on('session.start', async ($, e, next) => {
     const list = STATIONS.map((s, i) => `${i + 1}=${s.name}`).join(', ')
@@ -45,6 +45,16 @@ export const register: Register = on => {
       isChange = true
       if (!was) {
         return { text: `Volume set to ${volume}%. /music to play.` }
+      }
+      const set = await $.process.run(
+        [
+          'curl', '-s', '-m', '3', '-u', `:${was.password}`,
+          `http://127.0.0.1:${was.port}/requests/status.json?command=volume&val=${Math.round(volume * 2.56)}`,
+        ],
+        { timeoutMs: 5000 },
+      ).catch(() => undefined)
+      if (set?.exitCode === 0) {
+        return { text: `Volume ${volume}%.` }
       }
     } else if (arg) {
       const n = Number(arg)
@@ -72,14 +82,39 @@ export const register: Register = on => {
       return { text: 'yt-dlp could not resolve the stream. Try `pip install -U yt-dlp`.' }
     }
 
+    const port = 20000 + Math.floor(Math.random() * 40000)
+    const password = Math.random().toString(36).slice(2)
     const stream = $.process.spawn({
       argv: [
         'vlc', '-I', 'dummy', '--no-video', `--volume=${Math.round(volume * 2.56)}`,
+        '--extraintf', 'http', '--http-host', '127.0.0.1',
+        '--http-port', String(port), '--http-password', password,
         `--input-title-format=${MARK}`, url,
       ],
     })
-    const own = { stream }
+    const own = { stream, port, password }
     playing = own
+    const level = Math.round(volume * 2.56)
+    void (async () => {
+      for (let i = 0; i < 10; i++) {
+        await $.clock.sleep(1000)
+        if (playing !== own) {
+          return
+        }
+        const r = await $.process
+          .run(
+            [
+              'curl', '-s', '-m', '3', '-u', `:${password}`,
+              `http://127.0.0.1:${port}/requests/status.json?command=volume&val=${level}`,
+            ],
+            { timeoutMs: 5000 },
+          )
+          .catch(() => undefined)
+        if (r?.exitCode === 0) {
+          return
+        }
+      }
+    })()
     void (async () => {
       try {
         for await (const _ of stream) {
