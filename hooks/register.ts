@@ -39,6 +39,9 @@ export const register: Register = on => {
 
   on('command.run', { command: 'music' }, async ($, e) => {
     const arg = e.args.trim()
+    const home = await $.env.get('HOME')
+    const local = home ? `${home}/.local/bin/yt-dlp` : ''
+    const bin = local && (await $.fs.exists(local)) ? local : 'yt-dlp'
     const was = playing
 
     const custom = ((await $.store.get(CUSTOM_KEY)) ?? []) as Station[]
@@ -58,7 +61,7 @@ export const register: Register = on => {
       let name = added[2]?.trim()
       if (!name) {
         const t = await $.process
-          .run(['yt-dlp', '--no-playlist', '--print', 'title', '--', link], { timeoutMs: 45000 })
+          .run([bin, '--no-playlist', '--print', 'title', '--', link], { timeoutMs: 45000 })
           .catch(() => undefined)
         if (t?.exitCode !== 0) {
           return { text: 'yt-dlp could not read that link.' }
@@ -121,7 +124,7 @@ export const register: Register = on => {
     const station = all[index] ?? all[0] ?? BUILTIN[0]
     const resolve = () =>
       $.process.run(
-        ['yt-dlp', '-g', '-f', 'bestaudio/best', '--no-playlist', '--', station?.url ?? ''],
+        [bin, '-g', '-f', 'bestaudio/best', '--no-playlist', '--', station?.url ?? ''],
         { timeoutMs: 45000 },
       )
     let found = await resolve().catch(() => undefined)

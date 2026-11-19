@@ -19,7 +19,7 @@ claude plugin install dev-music --marketplace thangstevebh/claude-music
 ## Requirements
 
 - macOS
-- `yt-dlp` (resolves the stream; keep it updated with `pip install -U yt-dlp`)
+- `yt-dlp` (resolves the stream). Keep it current: YouTube changes often and old versions get HTTP 403. The mod uses `~/.local/bin/yt-dlp` when it exists, otherwise `yt-dlp` from your PATH.
 - VLC, with `vlc` on your PATH (plays the stream)
 
 ## Usage
